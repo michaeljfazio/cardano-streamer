@@ -74,6 +74,7 @@ library
                      , ouroboros-consensus:{ouroboros-consensus, cardano, protocol, diffusion, lsm, lmdb} >= 1.0.0.0
                      , ouroboros-network:api >= 0.24
                      , io-classes
+                     , microlens
                      , nothunks
                      , profunctors
                      , resource-registry
@@ -86,6 +87,7 @@ library
                      , transformers
                      , unliftio
                      , vector
+                     , vector-map
                      , sop-core
                      , sop-extras
 

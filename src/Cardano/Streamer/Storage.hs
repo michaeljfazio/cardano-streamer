@@ -15,6 +15,8 @@ module Cardano.Streamer.Storage (
   ledgerDbFlushExtLedgerState,
   ledgerDbStoreSnapshot,
   LedgerDbBackend (..),
+  LedgerDb (..),
+  HasLedgerDb (..),
   ledgerDbStateWithTablesForBlock,
   withImmutableDb,
 )
