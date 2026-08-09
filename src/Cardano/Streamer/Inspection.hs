@@ -74,9 +74,25 @@ swbGlobals :: SlotWithBlock -> TopLevelConfig (CardanoBlock StandardCrypto) -> M
 swbGlobals swb = globalsFromLedgerConfig (swbCardanoEra swb) (swbNewExtLedgerState swb)
 
 -- | Returns `True` if there was a transtion to a new epoch in this slot
+--
+-- Any FORWARD move of the epoch number is a new epoch. This deliberately does
+-- not use `isTrueNextEnum`, which additionally demands contiguity
+-- (@succ prev == cur@) and therefore `error`s at the Byron->Shelley seam: the
+-- Byron ledger state does not track epochs and reports `EpochNo 0` for the
+-- whole era, so the first Shelley block moves the epoch 0 -> 208 in one step.
+--
+-- Measured on mainnet with `dump-epoch-snapshots`:
+--
+-- > [Byron: EpochNo 0 - SlotNo 4492793] Blocks: 4490680
+-- > cstreamer: Unexpected previous: EpochNo 0 with relation to the current: EpochNo 208
+--
+-- which aborted the run at the transition, before a single epoch was dumped.
+-- Contiguity is a real invariant WITHIN an era and `isTrueNextEnum` still
+-- enforces it for `isFirstSlotOfNewEra`; it is simply not an invariant of the
+-- epoch number across the Byron boundary.
 isFirstSlotOfNewEpoch :: HasCallStack => SlotWithBlock -> Bool
 isFirstSlotOfNewEpoch swb =
-  isTrueNextEnum (extLedgerStateEpochNo (swbPrevExtLedgerState swb)) (swbEpochNo swb)
+  swbEpochNo swb > extLedgerStateEpochNo (swbPrevExtLedgerState swb)
 
 isFirstSlotOfNewEra :: HasCallStack => SlotWithBlock -> Bool
 isFirstSlotOfNewEra swb =
