@@ -29,8 +29,8 @@ import Cardano.Ledger.BaseTypes (
 import Cardano.Ledger.Slot (EpochSize (..), SlotNo (..), epochInfoSize)
 import Cardano.Ledger.Coin (Coin (..), DeltaCoin (..))
 import Cardano.Ledger.Compactible (fromCompact)
+import Cardano.Ledger.Rewards (Reward (..))
 import Cardano.Ledger.Core (
-  Reward (..),
   ppA0L,
   ppDG,
   ppMinPoolCostL,
