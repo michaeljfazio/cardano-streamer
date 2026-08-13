@@ -44,6 +44,9 @@ library
   build-depends:       base >= 4.8 && < 5
                      , aeson
                      , async
+                     -- Byron's genesis delegation map is a Bimap; already in the
+                     -- build plan as a cardano-ledger-byron dependency.
+                     , bimap
                      , bytestring
                      , base16-bytestring
                      , cardano-api >= 10.23

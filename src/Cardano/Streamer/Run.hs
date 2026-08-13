@@ -12,6 +12,24 @@
 
 module Cardano.Streamer.Run (runApp) where
 
+import Cardano.Chain.Block as Byron (ChainValidationState (..))
+import qualified Cardano.Chain.Common as Byron (lovelaceToInteger)
+import qualified Cardano.Chain.Delegation as Byron (unMap)
+import qualified Cardano.Chain.Delegation.Validation.Interface as ByronDI (State, delegationMap)
+import qualified Cardano.Chain.Slotting as Byron (
+  EpochNumber (getEpochNumber),
+  SlotNumber (unSlotNumber),
+  )
+import qualified Cardano.Chain.UTxO as Byron (UTxO, balance, unUTxO)
+-- `Cardano.Chain.Update.ProtocolParameters` is a HIDDEN module; `Cardano.Chain.Update`
+-- is the package's public façade for the same type.
+import qualified Cardano.Chain.Update as ByronPP (
+  ProtocolParameters (..),
+  )
+import qualified Cardano.Chain.Update.Validation.Interface as ByronUPI (
+  State (adoptedProtocolParameters, currentEpoch),
+  )
+import qualified Data.Bimap as Bimap
 import Cardano.Ledger.Address
 import Cardano.Ledger.BaseTypes (
   BlocksMade (..),
@@ -131,22 +149,94 @@ rationalToJson r =
     ]
 
 -- | Build the JSON snapshot for a given ledger state.
--- Returns Nothing for Byron.
+--
+-- Byron is dumped too, in its OWN shape — see 'extractByronSnapshotData'. It
+-- used to return Nothing, which made every Byron epoch oracle-silent and so
+-- structurally uncomparable: on mainnet that is epochs 1-207, i.e. the 207
+-- epochs that sit UNDER everything the Shelley-era comparison verifies.
+--
 -- Returns Just (fullJson, rupdNext) where rupdNext should be threaded to the
 -- next epoch's call as mRupdApplied (it is the reward update that will be
--- applied at that epoch boundary).
+-- applied at that epoch boundary). Byron has no reward update at all, so its
+-- rupdNext is Null — which is also the right value to thread into epoch 208,
+-- because the Byron->Shelley boundary applies none.
 buildSnapshotJson ::
   TopLevelConfig (CardanoBlock StandardCrypto) ->
   Maybe Aeson.Value ->
+  -- | The slot-derived epoch, for Byron only. Byron cannot report its own epoch
+  -- (see 'extLedgerStateEpochNoForSlot'), so the caller supplies it.
+  Maybe EpochNo ->
   ExtLedgerState (CardanoBlock StandardCrypto) mk ->
   Maybe (Aeson.Value, Aeson.Value)
-buildSnapshotJson topLevelConfig mRupdApplied extLedgerState =
+buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
   let eraName = show $ extLedgerStateCardanoEra extLedgerState
       mGlobals = globalsFromLedgerConfig (extLedgerStateCardanoEra extLedgerState) extLedgerState topLevelConfig
       mConwayGov = applyConwayNewEpochState extractConwayGovData extLedgerState
       mEpochNonce = extLedgerStateEpochNonce extLedgerState
-   in applyNonByronNewEpochState (extractSnapshotData eraName mGlobals mConwayGov mRupdApplied mEpochNonce) extLedgerState
+   in applyNewEpochState
+        (Just . (,Aeson.Null) . extractByronSnapshotData mByronEpoch)
+        (\_ -> Just . extractSnapshotData eraName mGlobals mConwayGov mRupdApplied mEpochNonce)
+        extLedgerState
   where
+    -- | Byron's ledger state, in the shape Byron actually has.
+    --
+    -- Byron is NOT a cut-down Shelley: there is no treasury, no reserves, no
+    -- reward pot, no stake distribution and no pools. Back-projecting the
+    -- Shelley shape onto it is exactly what disqualified Koios as an oracle, so
+    -- this emits only what 'ChainValidationState' carries and lets the
+    -- comparator see the rest as absent rather than as zero.
+    --
+    -- The load-bearing field is @utxo.balance@ — the circulating supply. It is
+    -- what the Shelley translation turns into @reserves@
+    -- (@maxLovelaceSupply - circulating@), so every reward calculation in every
+    -- later era rests on it. Byron burns fees (no treasury), so it falls
+    -- monotonically below genesis @initial_funds@.
+    --
+    -- Safe to read the UTxO here despite the DiffMK INVARIANT at the call site:
+    -- that invariant is about @esUTxOState@ / the ledger TABLES, and Byron has
+    -- none — @cvsUtxo@ is an ordinary strict field of 'ChainValidationState',
+    -- complete in every state regardless of the mapkind. Verified by the number
+    -- rather than by the types: the balance reproduces
+    -- @45e15 - reserves(epoch 208)@ to the lovelace, which an incomplete map
+    -- could not.
+    extractByronSnapshotData :: Maybe EpochNo -> ChainValidationState -> Aeson.Value
+    extractByronSnapshotData mEpoch cvs =
+      let utxo = cvsUtxo cvs
+          upiState = cvsUpdateState cvs
+          pparams = ByronUPI.adoptedProtocolParameters upiState
+          -- `balance` sums every output and can only fail on Lovelace overflow,
+          -- which a valid chain cannot reach. Emit null rather than 0 if it
+          -- ever does: a fabricated 0 would read as a real supply collapse.
+          mBalance = case Byron.balance utxo of
+            Right l -> Just (Byron.lovelaceToInteger l)
+            Left _ -> Nothing
+          delegs = Bimap.toList . Byron.unMap $ ByronDI.delegationMap (cvsDelegationState cvs)
+       in Aeson.object
+            [ -- The SLOT-derived epoch, supplied by the caller. Byron's own
+              -- `UPI.State.currentEpoch` is kept alongside it rather than used:
+              -- on mainnet it reads 0 for the entire era, and publishing that as
+              -- `epoch` would label all 207 dumps epoch 0.
+              "epoch" Aeson..= fmap unEpochNo mEpoch
+            , "byronUpdateEpoch" Aeson..= Byron.getEpochNumber (ByronUPI.currentEpoch upiState)
+            , "snapshotEraName" Aeson..= ("Byron" :: String)
+            , "lastSlot" Aeson..= Byron.unSlotNumber (cvsLastSlot cvs)
+            , "utxo"
+                Aeson..= Aeson.object
+                  [ "count" Aeson..= Map.size (Byron.unUTxO utxo)
+                  , "balance" Aeson..= mBalance
+                  ]
+            , "byronDelegation"
+                Aeson..= Aeson.object
+                  [ "count" Aeson..= length delegs
+                  ]
+            , "byronProtocolParams"
+                Aeson..= Aeson.object
+                  [ "scriptVersion" Aeson..= ByronPP.ppScriptVersion pparams
+                  , "maxBlockSize" Aeson..= ByronPP.ppMaxBlockSize pparams
+                  , "maxTxSize" Aeson..= ByronPP.ppMaxTxSize pparams
+                  , "txFeePolicy" Aeson..= show (ByronPP.ppTxFeePolicy pparams)
+                  ]
+            ]
     extractConwayGovData ::
       (ConwayEraGov era, ConwayEraCertState era) => NewEpochState era -> Aeson.Value
     extractConwayGovData nes =
@@ -342,9 +432,12 @@ dumpLedgerSnapshot :: RIO App ()
 dumpLedgerSnapshot = do
   extLedgerState <- ledgerDbTipExtLedgerState
   app <- ask
-  case buildSnapshotJson (pInfoConfig (dsAppProtocolInfo app)) Nothing extLedgerState of
+  -- Nothing for the Byron epoch: this one-shot dump has no slot context to
+  -- derive it from, so a Byron dump here reports `epoch: null` rather than a
+  -- guess. `dump-epoch-snapshots` is the path that supplies it.
+  case buildSnapshotJson (pInfoConfig (dsAppProtocolInfo app)) Nothing Nothing extLedgerState of
     Just (snapshotData, _) -> liftIO $ BSL.putStrLn $ Aeson.encode snapshotData
-    Nothing -> logError "Cannot dump Byron era snapshot"
+    Nothing -> logError "Cannot build snapshot for this ledger state"
 
 dumpEpochSnapshots :: RIO App ()
 dumpEpochSnapshots = do
@@ -353,11 +446,34 @@ dumpEpochSnapshots = do
     maybe (throwString "--out-dir is required for dump-epoch-snapshots") pure
       =<< asks dsAppOutDir
   prevRupdRef <- newIORef Nothing
+  -- Byron's epoch has to be tracked HERE rather than asked of the ledger.
+  -- `isFirstSlotOfNewEpoch` compares epoch numbers, and Byron reports
+  -- `EpochNo 0` for all 207 of its epochs (see `extLedgerStateEpochNoForSlot`),
+  -- so that predicate is false at every Byron block and the whole era emitted
+  -- nothing. This holds the last Byron epoch actually dumped, so the boundary
+  -- is detected from the SLOT.
+  lastByronEpochRef <- newIORef Nothing
   let topLevelConfig = pInfoConfig (dsAppProtocolInfo app)
       snapshotInspection =
         noInspection
-          { siFinal = \swb _ _ _ _ _ ->
-              when (isFirstSlotOfNewEpoch swb) $ do
+          { siFinal = \swb _ _ _ _ _ -> do
+              -- Byron: fire when the slot-derived epoch advances. Non-Byron is
+              -- left to the validated `isFirstSlotOfNewEpoch` untouched — at
+              -- the Byron->Shelley seam it still fires, because Byron's 0 is
+              -- below Shelley's 208.
+              let mByronEpoch
+                    | swbCardanoEra swb /= Byron = Nothing
+                    | otherwise =
+                        extLedgerStateEpochNoForSlot
+                          topLevelConfig
+                          (swbPrevExtLedgerState swb)
+                          (swbSlotNo swb)
+              isNewByronEpoch <- case mByronEpoch of
+                Nothing -> pure False
+                Just (EpochNo cur) -> do
+                  lastDumped <- readIORef lastByronEpochRef
+                  pure $ maybe True (cur >) lastDumped
+              when (isFirstSlotOfNewEpoch swb || isNewByronEpoch) $ do
                 prevRupd <- readIORef prevRupdRef
                 -- We use the post-block state (DiffMK) rather than the bare
                 -- epoch-boundary state. This is safe because buildSnapshotJson reads
@@ -367,16 +483,25 @@ dumpEpochSnapshots = do
                 -- unapplied DiffMK diffs are irrelevant.
                 -- INVARIANT: do not add snapshot fields that read from the UTxO
                 -- (esUTxOState / utxosUtxo) without switching to a ValuesMK state.
-                let mResult = buildSnapshotJson topLevelConfig prevRupd (swbNewExtLedgerState swb)
+                let mResult =
+                      buildSnapshotJson topLevelConfig prevRupd mByronEpoch (swbNewExtLedgerState swb)
                 forM_ mResult $ \(json, rupdNext) -> do
                   writeIORef prevRupdRef (Just rupdNext)
-                  let epochStr = show (unEpochNo (swbEpochNo swb))
+                  -- The epoch that NAMES the file must be the same one the JSON
+                  -- reports. In Byron `swbEpochNo` is 0 at every block, so using
+                  -- it would label all 207 dumps "epoch 0" — distinct filenames
+                  -- only because the slot differs, and a comparator keying on
+                  -- epoch would pair every one of them against epoch 0.
+                  let epochNo = fromMaybe (swbEpochNo swb) mByronEpoch
+                  forM_ mByronEpoch $ \(EpochNo e) ->
+                    writeIORef lastByronEpochRef (Just e)
+                  let epochStr = show (unEpochNo epochNo)
                       slotStr = show (unSlotNo (swbSlotNo swb))
                       fp = outDir </> epochStr <> "-" <> slotStr <> ".json"
                   liftIO $ BSL.writeFile fp (Aeson.encode json)
                   logInfo $
                     "Dumped epoch "
-                      <> display (swbEpochNo swb)
+                      <> display epochNo
                       <> " snapshot to: "
                       <> display (T.pack fp)
           }

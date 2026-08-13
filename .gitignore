@@ -25,3 +25,5 @@ benchmarks
 reports
 out-*
 debug
+# Locally pinned oracle binaries (231MB); provenance is recorded in dugite CLAUDE.md
+oracle-bin/

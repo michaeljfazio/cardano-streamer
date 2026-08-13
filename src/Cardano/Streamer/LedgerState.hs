@@ -30,6 +30,7 @@ module Cardano.Streamer.LedgerState (
   writeNewEpochState,
   extLedgerStateCardanoEra,
   extLedgerStateEpochNo,
+  extLedgerStateEpochNoForSlot,
   extLedgerStateEpochNonce,
   extractLedgerEvents,
   readGenesis,
@@ -78,7 +79,7 @@ import Cardano.Ledger.State
 import Cardano.Ledger.UMap as UM
 import Cardano.Ledger.Val
 import Cardano.Slotting.EpochInfo (fixedEpochInfo)
-import Cardano.Slotting.EpochInfo.API (hoistEpochInfo)
+import Cardano.Slotting.EpochInfo.API (epochInfoEpoch, hoistEpochInfo)
 import Cardano.Slotting.Slot
 import Cardano.Slotting.Time (mkSlotLength)
 import Cardano.Streamer.BlockInfo
@@ -673,6 +674,39 @@ extLedgerStateEpochNo =
   applyNewEpochState
     (EpochNo . Byron.getEpochNumber . Byron.currentEpoch . Byron.cvsUpdateState)
     (const nesEL)
+
+-- | The epoch a slot falls in, derived from the HARD FORK COMBINATOR rather
+-- than from the ledger state.
+--
+-- Needed because Byron does not track its epoch anywhere a caller can read.
+-- 'extLedgerStateEpochNo' asks Byron's update system via
+-- @UPI.State.currentEpoch@, and on mainnet that stays at @EpochNo 0@ for all
+-- 207 Byron epochs — so any trigger comparing epoch numbers is structurally
+-- dead in Byron, and @dump-epoch-snapshots@ emitted nothing for the whole era.
+--
+-- The HFC knows every era's epoch length (Byron's is @10 * k@ from the Byron
+-- genesis), so converting the SLOT is correct in Byron and in every later era,
+-- and it needs no hardcoded epoch length.
+--
+-- Returns Nothing only if the slot is outside the summary the ledger state can
+-- speak for — i.e. beyond the forecast horizon — which cannot happen for a slot
+-- whose own block has just been applied.
+-- Specialised to 'StandardCrypto' rather than polymorphic in @c@: `epochInfoLedger`
+-- carries a `PraosCrypto c` superclass obligation that a bare @c@ cannot satisfy,
+-- which is the same reason `globalsFromLedgerConfig` is concrete.
+extLedgerStateEpochNoForSlot ::
+  TopLevelConfig (CardanoBlock StandardCrypto) ->
+  ExtLedgerState (CardanoBlock StandardCrypto) mk ->
+  SlotNo ->
+  Maybe EpochNo
+extLedgerStateEpochNoForSlot lc (ExtLedgerState ledgerState _) slot =
+  case runExcept (epochInfoEpoch epochInfo slot) of
+    Right e -> Just e
+    Left _ -> Nothing
+  where
+    hardForkLedgerConfig = topLevelConfigLedger lc
+    HardForkLedgerState hardForkState = ledgerState
+    epochInfo = epochInfoLedger hardForkLedgerConfig hardForkState
 
 -- | Extract the epoch nonce (η₀) from the current era's chain dep state.
 -- Returns Nothing for Byron which uses a different consensus protocol.
