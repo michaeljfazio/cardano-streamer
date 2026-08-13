@@ -46,15 +46,52 @@ import Cardano.Ledger.Slot (EpochSize (..), SlotNo (..), epochInfoSize)
 import Cardano.Ledger.Coin (Coin (..), DeltaCoin (..))
 import Cardano.Ledger.Compactible (fromCompact)
 import Cardano.Ledger.Core (
+  PParams,
   Reward (..),
   ppA0L,
   ppDG,
+  ppEMaxL,
+  ppKeyDepositL,
+  ppMaxBBSizeL,
+  ppMaxBHSizeL,
+  ppMaxTxSizeL,
+  ppMinFeeAL,
+  ppMinFeeBL,
   ppMinPoolCostL,
   ppNOptL,
+  ppPoolDepositL,
   ppProtocolVersionL,
   ppRhoL,
   ppTauL,
   )
+import Cardano.Ledger.Alonzo.PParams (
+  AlonzoEraPParams,
+  ppCollateralPercentageL,
+  ppCostModelsL,
+  ppMaxBlockExUnitsL,
+  ppMaxCollateralInputsL,
+  ppMaxTxExUnitsL,
+  ppMaxValSizeL,
+  ppPricesL,
+  )
+import Cardano.Ledger.Babbage.PParams (
+  BabbageEraPParams,
+  ppCoinsPerUTxOByteL,
+  unCoinPerByte,
+  )
+import Cardano.Ledger.Conway.PParams (
+  ConwayEraPParams,
+  ppCommitteeMaxTermLengthL,
+  ppCommitteeMinSizeL,
+  ppDRepActivityL,
+  ppDRepDepositL,
+  ppDRepVotingThresholdsL,
+  ppGovActionDepositL,
+  ppGovActionLifetimeL,
+  ppMinFeeRefScriptCostPerByteL,
+  ppPoolVotingThresholdsL,
+  )
+import Data.Aeson.Types (Pair)
 import Cardano.Ledger.Conway.Governance (
   ConwayEraGov (committeeGovStateL, constitutionGovStateL),
   finishDRepPulser,
@@ -173,11 +210,64 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
       mGlobals = globalsFromLedgerConfig (extLedgerStateCardanoEra extLedgerState) extLedgerState topLevelConfig
       mConwayGov = applyConwayNewEpochState extractConwayGovData extLedgerState
       mEpochNonce = extLedgerStateEpochNonce extLedgerState
+      -- Era-GATED protocol parameters, emitted only in the eras that have them.
+      --
+      -- A sibling key rather than extra fields inside `protocolParams`: that
+      -- object is already compared across 312 mainnet epochs, and widening a
+      -- compared object changes existing paths. This is purely additive.
+      --
+      -- Nothing (hence an absent key) in eras that lack the group — Shelley,
+      -- Allegra and Mary have no cost models, so emitting an empty map there
+      -- would manufacture a value for a parameter that does not exist.
+      eraPParams =
+        Aeson.object $
+          concat
+            [ maybe [] id (applyAlonzoPParams alonzoPParamsPairs extLedgerState)
+            , maybe [] id (applyBabbagePParams babbagePParamsPairs extLedgerState)
+            , maybe [] id (applyConwayPParams conwayPParamsPairs extLedgerState)
+            ]
    in applyNewEpochState
         (Just . (,Aeson.Null) . extractByronSnapshotData mByronEpoch)
-        (\_ -> Just . extractSnapshotData eraName mGlobals mConwayGov mRupdApplied mEpochNonce)
+        (\_ -> Just . extractSnapshotData eraName mGlobals mConwayGov mRupdApplied mEpochNonce eraPParams)
         extLedgerState
   where
+    -- Introduced by ALONZO: Plutus cost models, execution-unit budgets and
+    -- prices, collateral, and the max serialised Value size.
+    alonzoPParamsPairs :: AlonzoEraPParams era => PParams era -> [Pair]
+    alonzoPParamsPairs pp =
+      [ "costModels" Aeson..= (pp ^. ppCostModelsL)
+      , "executionUnitPrices" Aeson..= (pp ^. ppPricesL)
+      , "maxTxExUnits" Aeson..= (pp ^. ppMaxTxExUnitsL)
+      , "maxBlockExUnits" Aeson..= (pp ^. ppMaxBlockExUnitsL)
+      , "maxValueSize" Aeson..= (pp ^. ppMaxValSizeL)
+      , "collateralPercentage" Aeson..= (pp ^. ppCollateralPercentageL)
+      , "maxCollateralInputs" Aeson..= (pp ^. ppMaxCollateralInputsL)
+      ]
+
+    -- Introduced by BABBAGE. Alonzo's `coinsPerUTxOWord` is a DIFFERENT
+    -- parameter with a different unit, and conflating the two is dugite #919.
+    babbagePParamsPairs :: BabbageEraPParams era => PParams era -> [Pair]
+    babbagePParamsPairs pp =
+      [ "coinsPerUTxOByte" Aeson..= unCoinPerByte (pp ^. ppCoinsPerUTxOByteL)
+      ]
+
+    -- Introduced by CONWAY (CIP-1694). The two threshold records are the
+    -- reason these are worth comparing: they are order-sensitive on the wire and
+    -- a wrong field order silently changes which governance actions pass.
+    conwayPParamsPairs :: ConwayEraPParams era => PParams era -> [Pair]
+    conwayPParamsPairs pp =
+      [ "poolVotingThresholds" Aeson..= (pp ^. ppPoolVotingThresholdsL)
+      , "dRepVotingThresholds" Aeson..= (pp ^. ppDRepVotingThresholdsL)
+      , "committeeMinSize" Aeson..= (pp ^. ppCommitteeMinSizeL)
+      , "committeeMaxTermLength" Aeson..= (pp ^. ppCommitteeMaxTermLengthL)
+      , "govActionLifetime" Aeson..= (pp ^. ppGovActionLifetimeL)
+      , "govActionDeposit" Aeson..= unCoin (pp ^. ppGovActionDepositL)
+      , "dRepDeposit" Aeson..= unCoin (pp ^. ppDRepDepositL)
+      , "dRepActivity" Aeson..= (pp ^. ppDRepActivityL)
+      , "minFeeRefScriptCostPerByte"
+          Aeson..= rationalToJson (unboundRational (pp ^. ppMinFeeRefScriptCostPerByteL))
+      ]
+
     -- | Byron's ledger state, in the shape Byron actually has.
     --
     -- Byron is NOT a cut-down Shelley: there is no treasury, no reserves, no
@@ -256,7 +346,7 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
             ]
 
     -- Returns (fullJson, rupdData) where rupdData is threaded to the next epoch.
-    extractSnapshotData eraName mGlobals mConwayGov mPrevRupd mEpochNonce nes =
+    extractSnapshotData eraName mGlobals mConwayGov mPrevRupd mEpochNonce eraPParams nes =
       let epochNum = case nesEL nes of EpochNo n -> n
           epochState = nesEs nes
           poolDistr = nesPd nes
@@ -347,6 +437,24 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
               , "protocolVersion" Aeson..= (pr ^. ppProtocolVersionL)
               ]
 
+          -- Era-COMMON parameters (every era from Shelley on). Separate from
+          -- `protoParams` for the same reason `eraPParams` is: that object is
+          -- already compared across 312 mainnet epochs, so this is additive.
+          --
+          -- These carry real defect history — the fee parameters and deposits
+          -- decide tx validity, and `eMax` decides pool retirement.
+          commonPParams =
+            Aeson.object
+              [ "minFeeA" Aeson..= unCoin (pr ^. ppMinFeeAL)
+              , "minFeeB" Aeson..= unCoin (pr ^. ppMinFeeBL)
+              , "maxBlockBodySize" Aeson..= (pr ^. ppMaxBBSizeL)
+              , "maxTxSize" Aeson..= (pr ^. ppMaxTxSizeL)
+              , "maxBlockHeaderSize" Aeson..= (pr ^. ppMaxBHSizeL)
+              , "keyDeposit" Aeson..= unCoin (pr ^. ppKeyDepositL)
+              , "poolDeposit" Aeson..= unCoin (pr ^. ppPoolDepositL)
+              , "eMax" Aeson..= (pr ^. ppEMaxL)
+              ]
+
           -- Circulation and active stake
           totalStake = case mGlobals of
             Nothing -> Nothing
@@ -398,6 +506,8 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
               , "snapshotEraName" Aeson..= eraName
               , "epochNonce" Aeson..= mEpochNonce
               , "protocolParams" Aeson..= protoParams
+              , "commonProtocolParams" Aeson..= commonPParams
+              , "eraProtocolParams" Aeson..= eraPParams
               , "totalStake" Aeson..= totalStake
               , "activeStake" Aeson..= activeStake
               , "eta" Aeson..= fmap rationalToJson mEta

@@ -19,6 +19,9 @@ module Cardano.Streamer.LedgerState (
   encodeNewEpochState,
   applyNonByronNewEpochState,
   applyConwayNewEpochState,
+  applyAlonzoPParams,
+  applyBabbagePParams,
+  applyConwayPParams,
   applyNewEpochState,
   modifyLedgerState,
   applyTickedNewEpochStateWithBlock,
@@ -105,7 +108,10 @@ import Data.SOP.Telescope
 import Ouroboros.Consensus.Byron.ByronHFC ()
 import Ouroboros.Consensus.Byron.Ledger.Block
 import Ouroboros.Consensus.Byron.Ledger.Ledger
+import Cardano.Ledger.Alonzo.PParams (AlonzoEraPParams)
+import Cardano.Ledger.Babbage.PParams (BabbageEraPParams)
 import Cardano.Ledger.Conway.Governance (ConwayEraGov)
+import Cardano.Ledger.Conway.PParams (ConwayEraPParams)
 import Cardano.Ledger.Conway.State (ConwayEraCertState)
 import Ouroboros.Consensus.Cardano.Block
 import Ouroboros.Consensus.Config (TopLevelConfig (..))
@@ -596,6 +602,60 @@ applyConwayNewEpochState f extLedgerState =
   case ledgerState extLedgerState of
     LedgerStateConway ls -> Just $ f (shelleyLedgerState ls)
     LedgerStateDijkstra ls -> Just $ f (shelleyLedgerState ls)
+    _ -> Nothing
+
+-- | Protocol parameters that exist from ALONZO onwards.
+--
+-- Cost models, execution units, prices, collateral and max value size are
+-- introduced by Alonzo, so a single era-common accessor cannot reach them —
+-- hence one traversal per era group, the same shape
+-- 'applyConwayNewEpochState' already uses for governance.
+--
+-- Returns Nothing in Shelley/Allegra/Mary, where these parameters do not exist.
+-- That is the honest answer: emitting a zero or an empty map for an era that has
+-- no such parameter manufactures a value, which is what back-projecting a later
+-- era's shape onto an earlier one always does.
+applyAlonzoPParams ::
+  (forall era. AlonzoEraPParams era => PParams era -> a) ->
+  ExtLedgerState (CardanoBlock c) mk ->
+  Maybe a
+applyAlonzoPParams f extLedgerState =
+  case ledgerState extLedgerState of
+    LedgerStateAlonzo ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    LedgerStateBabbage ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    LedgerStateConway ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    LedgerStateDijkstra ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    _ -> Nothing
+
+-- | Protocol parameters that exist from BABBAGE onwards — i.e. the
+-- @coinsPerUTxOByte@ replacement for Alonzo's @coinsPerUTxOWord@. Conflating the
+-- two is dugite issue #919's defect.
+applyBabbagePParams ::
+  (forall era. BabbageEraPParams era => PParams era -> a) ->
+  ExtLedgerState (CardanoBlock c) mk ->
+  Maybe a
+applyBabbagePParams f extLedgerState =
+  case ledgerState extLedgerState of
+    LedgerStateBabbage ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    LedgerStateConway ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    LedgerStateDijkstra ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    _ -> Nothing
+
+-- | Protocol parameters introduced by CONWAY — the governance thresholds,
+-- deposits and lifetimes of CIP-1694.
+--
+-- Worth having in a cross-validation dump specifically because the threshold
+-- RECORDS are order-sensitive on the wire and a wrong field order changes which
+-- governance actions pass (dugite issue #951: @drep_voting_thresholds@ encoded
+-- ten elements in the wrong order while its decoder was right).
+applyConwayPParams ::
+  (forall era. ConwayEraPParams era => PParams era -> a) ->
+  ExtLedgerState (CardanoBlock c) mk ->
+  Maybe a
+applyConwayPParams f extLedgerState =
+  case ledgerState extLedgerState of
+    LedgerStateConway ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
+    LedgerStateDijkstra ls -> Just $ f (nesEs (shelleyLedgerState ls) ^. prevPParamsEpochStateL)
     _ -> Nothing
 
 applyTickedNewEpochState ::
