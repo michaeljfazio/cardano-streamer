@@ -81,6 +81,8 @@ import Cardano.Ledger.Babbage.PParams (
   )
 import Cardano.Ledger.Conway.PParams (
   ConwayEraPParams,
+  DRepVotingThresholds (..),
+  PoolVotingThresholds (..),
   ppCommitteeMaxTermLengthL,
   ppCommitteeMinSizeL,
   ppDRepActivityL,
@@ -185,6 +187,54 @@ rationalToJson r =
     , "denominator" Aeson..= denominator r
     ]
 
+-- | The governance thresholds, named and as EXACT rationals.
+--
+-- Two deliberate choices, both about making a comparison meaningful rather than
+-- merely present.
+--
+-- NAMED, not positional: these records are order-sensitive on the wire, and
+-- getting that order wrong is a real defect (dugite #951 shifted six of the ten
+-- DRep thresholds and appended `constitution` where `treasuryWithdrawal`
+-- belongs, silently changing which governance actions pass). Comparing named
+-- keys catches a mislabelled field; comparing an array cannot distinguish a
+-- wrong order from a wrong value.
+--
+-- EXACT rationals, not the ledger's own `ToJSON`: that renders a `UnitInterval`
+-- as a decimal, so 51/100 becomes @0.51@ — and this module deliberately encodes
+-- every other rational parameter as {numerator, denominator} for exactly that
+-- reason ("encoded as exact rationals, not Double"). A decimal on one side and a
+-- ratio on the other is a definitional mismatch that shows up as a divergence
+-- while proving nothing, which is the `eta` and `epochFees` failure again.
+poolThresholdsJson :: PoolVotingThresholds -> Aeson.Value
+poolThresholdsJson t =
+  Aeson.object
+    [ "motionNoConfidence" Aeson..= u (pvtMotionNoConfidence t)
+    , "committeeNormal" Aeson..= u (pvtCommitteeNormal t)
+    , "committeeNoConfidence" Aeson..= u (pvtCommitteeNoConfidence t)
+    , "hardForkInitiation" Aeson..= u (pvtHardForkInitiation t)
+    , "ppSecurityGroup" Aeson..= u (pvtPPSecurityGroup t)
+    ]
+  where
+    u = rationalToJson . unboundRational
+
+-- | The ten DRep thresholds, in the canonical order, each named.
+drepThresholdsJson :: DRepVotingThresholds -> Aeson.Value
+drepThresholdsJson t =
+  Aeson.object
+    [ "motionNoConfidence" Aeson..= u (dvtMotionNoConfidence t)
+    , "committeeNormal" Aeson..= u (dvtCommitteeNormal t)
+    , "committeeNoConfidence" Aeson..= u (dvtCommitteeNoConfidence t)
+    , "updateToConstitution" Aeson..= u (dvtUpdateToConstitution t)
+    , "hardForkInitiation" Aeson..= u (dvtHardForkInitiation t)
+    , "ppNetworkGroup" Aeson..= u (dvtPPNetworkGroup t)
+    , "ppEconomicGroup" Aeson..= u (dvtPPEconomicGroup t)
+    , "ppTechnicalGroup" Aeson..= u (dvtPPTechnicalGroup t)
+    , "ppGovGroup" Aeson..= u (dvtPPGovGroup t)
+    , "treasuryWithdrawal" Aeson..= u (dvtTreasuryWithdrawal t)
+    ]
+  where
+    u = rationalToJson . unboundRational
+
 -- | Build the JSON snapshot for a given ledger state.
 --
 -- Byron is dumped too, in its OWN shape — see 'extractByronSnapshotData'. It
@@ -256,8 +306,8 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
     -- a wrong field order silently changes which governance actions pass.
     conwayPParamsPairs :: ConwayEraPParams era => PParams era -> [Pair]
     conwayPParamsPairs pp =
-      [ "poolVotingThresholds" Aeson..= (pp ^. ppPoolVotingThresholdsL)
-      , "dRepVotingThresholds" Aeson..= (pp ^. ppDRepVotingThresholdsL)
+      [ "poolVotingThresholds" Aeson..= poolThresholdsJson (pp ^. ppPoolVotingThresholdsL)
+      , "dRepVotingThresholds" Aeson..= drepThresholdsJson (pp ^. ppDRepVotingThresholdsL)
       , "committeeMinSize" Aeson..= (pp ^. ppCommitteeMinSizeL)
       , "committeeMaxTermLength" Aeson..= (pp ^. ppCommitteeMaxTermLengthL)
       , "govActionLifetime" Aeson..= (pp ^. ppGovActionLifetimeL)
