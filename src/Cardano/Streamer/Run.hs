@@ -64,6 +64,7 @@ import Cardano.Ledger.Core (
   ppRhoL,
   ppTauL,
   )
+import Cardano.Ledger.Alonzo.Scripts (Prices (..))
 import Cardano.Ledger.Alonzo.PParams (
   AlonzoEraPParams,
   ppCollateralPercentageL,
@@ -286,7 +287,17 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
     alonzoPParamsPairs :: AlonzoEraPParams era => PParams era -> [Pair]
     alonzoPParamsPairs pp =
       [ "costModels" Aeson..= (pp ^. ppCostModelsL)
-      , "executionUnitPrices" Aeson..= (pp ^. ppPricesL)
+      , -- Exact rationals, for the same reason the governance thresholds are.
+        -- The ledger's own ToJSON renders these `NonNegativeInterval`s as
+        -- decimals, and mainnet's step price comes out in SCIENTIFIC notation
+        -- (`7.21e-05`) — a spelling any other implementation would have to
+        -- reproduce character for character to compare equal. `721/10000000` is
+        -- the value; `7.21e-05` is one rendering of it.
+        "executionUnitPrices"
+          Aeson..= Aeson.object
+            [ "priceMemory" Aeson..= rationalToJson (unboundRational (prMem (pp ^. ppPricesL)))
+            , "priceSteps" Aeson..= rationalToJson (unboundRational (prSteps (pp ^. ppPricesL)))
+            ]
       , "maxTxExUnits" Aeson..= (pp ^. ppMaxTxExUnitsL)
       , "maxBlockExUnits" Aeson..= (pp ^. ppMaxBlockExUnitsL)
       , "maxValueSize" Aeson..= (pp ^. ppMaxValSizeL)
