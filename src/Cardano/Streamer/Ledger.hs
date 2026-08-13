@@ -22,7 +22,8 @@ import Cardano.Ledger.Api.Tx
 import Cardano.Ledger.Babbage.Collateral (collOuts)
 import Cardano.Ledger.Babbage.Core
 import Cardano.Ledger.BaseTypes
-import Cardano.Ledger.Binary (EncCBOR, ToCBOR)
+import Cardano.Ledger.Binary (EncCBOR, MinVersion, ToCBOR)
+import GHC.TypeLits (type (<=))
 import Cardano.Ledger.Coin
 import qualified Cardano.Ledger.Conway.Rules as Conway
 import Cardano.Ledger.Credential
@@ -89,6 +90,17 @@ appScriptSize = SBS.length . appScriptBytes
 
 class
   ( Era era
+  -- The encoding-version bounds every real era satisfies, stated so that
+  -- era-polymorphic callers get them.
+  --
+  -- cardano-ledger's newer API constrains functions like `obligationCertState`
+  -- and the `ppDG` getter on these, and `EraApp` is the only constraint a
+  -- caller reached through `applyNonByronNewEpochState` has — so without them
+  -- every such call failed with "Cannot satisfy: MinVersion <= ProtVerHigh era"
+  -- at the USE site, where the fix is not obvious. Each concrete era instance
+  -- discharges them automatically.
+  , MinVersion <= ProtVerHigh era
+  , ProtVerLow era <= ProtVerHigh era
   , EraBlockBody era
   , EraGov era
   , EraUTxO era

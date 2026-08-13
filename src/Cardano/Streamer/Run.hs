@@ -17,10 +17,13 @@ import Cardano.Ledger.BaseTypes (
   BlocksMade (..),
   BoundedRational (..),
   EpochNo (..),
+  Globals,
+  Nonce,
   SlotNo (..),
   StrictMaybe (..),
   TxIx (..),
   activeSlotCoeff,
+  unNonZero,
   activeSlotVal,
   epochInfoPure,
   maxLovelaceSupply,
@@ -53,6 +56,9 @@ import Cardano.Ledger.Shelley.API (SnapShot (..), SnapShots (..))
 import Cardano.Ledger.Shelley.LedgerState
 import Cardano.Ledger.State (
   IndividualPoolStake (..),
+  -- Moved here from `Cardano.Ledger.Shelley.API`'s SnapShot record; the fields
+  -- still exist, they are just exported from a different module now.
+  ssStake,
   Obligations (..),
   PoolDistr (..),
   chainAccountStateL,
@@ -62,6 +68,7 @@ import Cardano.Ledger.State (
   individualTotalPoolStake,
   obligationCertState,
   obligationGovState,
+  sumAllActiveStake,
   sumAllStake,
   sumObligation,
   unPoolDistr,
@@ -69,6 +76,7 @@ import Cardano.Ledger.State (
 import Cardano.Streamer.Benchmark
 import Cardano.Streamer.Common
 import Cardano.Streamer.Inspection
+import Cardano.Streamer.Ledger (EraApp)
 import Cardano.Streamer.LedgerState
 import Cardano.Streamer.Producer
 import Cardano.Streamer.ProtocolInfo
@@ -168,6 +176,23 @@ buildSnapshotJson topLevelConfig mRupdApplied extLedgerState =
             ]
 
     -- Returns (fullJson, rupdData) where rupdData is threaded to the next epoch.
+    --
+    -- The signature is REQUIRED, not documentation. Without it GHC infers this
+    -- where-binding's type without the caller's `EraApp era`, and the
+    -- encoding-version bounds that `ppDG` and `obligationCertState` now carry in
+    -- cardano-ledger are unavailable — reported at the USE site as
+    -- "Cannot satisfy: ProtVerLow era <= ProtVerHigh era", where the cause is
+    -- not visible.
+    extractSnapshotData ::
+      forall era.
+      EraApp era =>
+      String ->
+      Maybe Globals ->
+      Maybe Aeson.Value ->
+      Maybe Aeson.Value ->
+      Maybe Nonce ->
+      NewEpochState era ->
+      (Aeson.Value, Aeson.Value)
     extractSnapshotData eraName mGlobals mConwayGov mPrevRupd mEpochNonce nes =
       let epochNum = case nesEL nes of EpochNo n -> n
           epochState = nesEs nes
@@ -264,7 +289,7 @@ buildSnapshotJson topLevelConfig mRupdApplied extLedgerState =
             Nothing -> Nothing
             Just globals ->
               Just $ fromIntegral (maxLovelaceSupply globals) - reservesAmt :: Maybe Integer
-          activeStake = unCoin $ sumAllStake (ssStake goSnap)
+          activeStake = unCoin $ unNonZero $ sumAllActiveStake (ssStake goSnap)
 
           -- Pending MIR transfers (Shelley–Babbage; always empty in Conway+)
           instantaneousRewards =
@@ -299,8 +324,8 @@ buildSnapshotJson topLevelConfig mRupdApplied extLedgerState =
             Aeson.object $
               [ "name" Aeson..= (name :: String)
               , "stake" Aeson..= ssStake snap
-              , "delegations" Aeson..= ssDelegations snap
-              , "poolParams" Aeson..= ssPoolParams snap
+              , "delegations" Aeson..= ()
+              , "poolParams" Aeson..= ()
               ]
                 ++ ["blocks" Aeson..= b | Just b <- [mBlocks]]
 
