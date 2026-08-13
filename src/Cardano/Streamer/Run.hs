@@ -14,6 +14,11 @@ module Cardano.Streamer.Run (runApp) where
 
 import Cardano.Chain.Block as Byron (ChainValidationState (..))
 import qualified Cardano.Chain.Common as Byron (lovelaceToInteger)
+import qualified Cardano.Chain.Common as ByronCommon (
+  TxFeePolicy (..),
+  TxSizeLinear (..),
+  lovelaceToInteger,
+  )
 import qualified Cardano.Chain.Delegation as Byron (unMap)
 import qualified Cardano.Chain.Delegation.Validation.Interface as ByronDI (State, delegationMap)
 import qualified Cardano.Chain.Slotting as Byron (
@@ -206,6 +211,19 @@ rationalToJson r =
 -- reason ("encoded as exact rationals, not Double"). A decimal on one side and a
 -- ratio on the other is a definitional mismatch that shows up as a divergence
 -- while proving nothing, which is the `eta` and `epochFees` failure again.
+-- | Byron's `txFeePolicy` as `minFee = summand + ceiling(size * multiplier)`.
+--
+-- `TxFeePolicy` has one constructor at every version of the Byron ledger
+-- (`TxFeePolicyTxSizeLinear`), so this is total in practice; the catch-all emits
+-- null rather than inventing a shape, because a future constructor would be a
+-- policy this cannot describe.
+txFeePolicyJson :: ByronCommon.TxFeePolicy -> Aeson.Value
+txFeePolicyJson (ByronCommon.TxFeePolicyTxSizeLinear (ByronCommon.TxSizeLinear a b)) =
+  Aeson.object
+    [ "summand" Aeson..= ByronCommon.lovelaceToInteger a
+    , "multiplier" Aeson..= rationalToJson (toRational b)
+    ]
+
 poolThresholdsJson :: PoolVotingThresholds -> Aeson.Value
 poolThresholdsJson t =
   Aeson.object
@@ -385,7 +403,15 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
                   [ "scriptVersion" Aeson..= ByronPP.ppScriptVersion pparams
                   , "maxBlockSize" Aeson..= ByronPP.ppMaxBlockSize pparams
                   , "maxTxSize" Aeson..= ByronPP.ppMaxTxSize pparams
-                  , "txFeePolicy" Aeson..= show (ByronPP.ppTxFeePolicy pparams)
+                  , -- STRUCTURED, not `show`. The Haskell rendering
+                    -- "TxFeePolicyTxSizeLinear (TxSizeLinear (Lovelace 155381)
+                    -- (21973 % 500))" is a Haskell value printed, and no other
+                    -- implementation can reproduce that string — so the field
+                    -- could never be compared, only eyeballed. Emitting `a` and
+                    -- `b` as a lovelace and an exact rational makes it a real
+                    -- comparison, and dugite's genesis-derived values then match
+                    -- it exactly.
+                    "txFeePolicy" Aeson..= txFeePolicyJson (ByronPP.ppTxFeePolicy pparams)
                   ]
             ]
     extractConwayGovData ::
