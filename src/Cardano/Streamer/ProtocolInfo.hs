@@ -11,13 +11,18 @@
 module Cardano.Streamer.ProtocolInfo where
 
 import qualified Cardano.Api as Api
-import Cardano.Ledger.BaseTypes (SlotNo (..))
+import qualified Cardano.Api.Byron as ApiByron
+import Cardano.Ledger.BaseTypes (ProtVer (..), SlotNo (..), natVersion)
+import Cardano.Ledger.Core (ProtVerHigh)
 import Cardano.Streamer.Common
 import Cardano.Streamer.Storage
 import Control.Monad.Trans.Except
 import Criterion.Measurement (initializeTime)
+import qualified Ouroboros.Consensus.Byron.Node as Consensus
+import qualified Ouroboros.Consensus.Cardano as Consensus
 import Ouroboros.Consensus.Cardano.Block
-import Ouroboros.Consensus.Config (configStorage)
+import qualified Ouroboros.Consensus.Cardano.Node as Consensus
+import Ouroboros.Consensus.Config (configStorage, emptyCheckpointsMap)
 import qualified Ouroboros.Consensus.Node as Node
 import qualified Ouroboros.Consensus.Node.InitStorage as Node
 import Ouroboros.Consensus.Node.ProtocolInfo (ProtocolInfo (..))
@@ -51,7 +56,69 @@ readCardanoGenesisConfig =
 readProtocolInfoCardano :: MonadIO m => FilePath -> m (ProtocolInfo (CardanoBlock StandardCrypto))
 readProtocolInfoCardano configFilePath = do
   nodeConfig <- readNodeConfig configFilePath
-  fst . Api.mkProtocolInfoCardano <$> readCardanoGenesisConfig nodeConfig
+  mkProtocolInfoCardanoAtLedgerMaxPV <$> readCardanoGenesisConfig nodeConfig
+
+-- | 'Api.mkProtocolInfoCardano' with the obsolete-node bound raised to the
+-- greatest protocol version the LEDGER in this dependency set declares it
+-- implements, instead of the constant cardano-api hardcodes.
+--
+-- cardano-api writes the bound as a literal:
+--
+-- > , Consensus.cardanoProtocolVersion = ProtVer (natVersion @10) 0
+--
+-- byte-identical in 10.23.0.0 and 10.26.0.0, and consensus turns that one field
+-- into the bound every header is checked against
+-- (@Ouroboros.Consensus.Cardano.Node@):
+--
+-- > -- The major protocol version of the last era is the maximum major protocol
+-- > -- version we support.
+-- > maxMajorProtVer = MaxMajorProtVer $ pvMajor cardanoProtocolVersion
+--
+-- so a PV11 header dies with @ObsoleteNode (Version 11) (Version 10)@ however
+-- new the packages are. That is why bumping cardano-api 10.23 -> 10.26 did not
+-- move it, and why a changelog's @ProtVerHigh@ is not evidence about what a
+-- node ACCEPTS.
+--
+-- The bound is taken from @ProtVerHigh ConwayEra@ rather than written as 11, so
+-- it tracks the pinned ledger instead of becoming a second constant to keep in
+-- step with it. Conway and not the last era on purpose: Dijkstra has not
+-- shipped, and cardano-api's lower literal is exactly how consensus documents
+-- marking a trailing era experimental. An oracle that silently accepted an era
+-- whose rules it cannot check would report agreement it never established.
+--
+-- The block-forging half of 'Consensus.protocolInfoCardano' is discarded here:
+-- cardano-streamer replays an existing chain and never mints, so the other
+-- documented consequence of this field — the protocol version stamped into
+-- minted headers — cannot arise.
+mkProtocolInfoCardanoAtLedgerMaxPV
+  :: Api.GenesisConfig
+  -> ProtocolInfo (CardanoBlock StandardCrypto)
+mkProtocolInfoCardanoAtLedgerMaxPV (Api.GenesisCardano dnc byronGenesis shelleyGenesisHash transCfg) =
+  fst $
+    -- @IO pins the monad of the discarded block-forging half, which is
+    -- otherwise ambiguous once 'fst' throws it away.
+    Consensus.protocolInfoCardano @StandardCrypto @IO
+    Consensus.CardanoProtocolParams
+      { Consensus.byronProtocolParams =
+          Consensus.ProtocolParamsByron
+            { Consensus.byronGenesis = byronGenesis
+            , Consensus.byronPbftSignatureThreshold =
+                Consensus.PBftSignatureThreshold <$> Api.ncPBftSignatureThreshold dnc
+            , Consensus.byronProtocolVersion = Api.ncByronProtocolVersion dnc
+            , Consensus.byronSoftwareVersion = ApiByron.softwareVersion
+            , Consensus.byronLeaderCredentials = Nothing
+            }
+      , Consensus.shelleyBasedProtocolParams =
+          Consensus.ProtocolParamsShelleyBased
+            { Consensus.shelleyBasedInitialNonce = Api.shelleyPraosNonce shelleyGenesisHash
+            , Consensus.shelleyBasedLeaderCredentials = []
+            }
+      , Consensus.cardanoHardForkTriggers = Api.ncHardForkTriggers dnc
+      , Consensus.cardanoLedgerTransitionConfig = transCfg
+      , Consensus.cardanoCheckpoints = emptyCheckpointsMap
+      , Consensus.cardanoProtocolVersion =
+          ProtVer (natVersion @(ProtVerHigh ConwayEra)) 0
+      }
 
 -- TODO: Move upstream
 instance Exception ReadIncrementalErr
