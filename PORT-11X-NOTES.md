@@ -1,5 +1,38 @@
 # Porting cardano-streamer to a cardano-node 11.x dependency set
 
+> ## SUPERSEDED — read this first
+>
+> **The PV10 cap is not a dependency-set property. It is one literal**, in the
+> single function this project calls to build its `ProtocolInfo`:
+>
+> ```haskell
+> -- cardano-api, Cardano/Api/LedgerState.hs :: mkProtocolInfoCardano
+> , Consensus.cardanoProtocolVersion = ProtVer (natVersion @10) 0
+> ```
+>
+> byte-identical in 10.23.0.0 and 10.26.0.0 — which is exactly why the port
+> below did not move it. Consensus turns that one field into the bound every
+> header is checked against, and says so itself:
+>
+> ```haskell
+> -- ouroboros-consensus-cardano, Ouroboros/Consensus/Cardano/Node.hs
+> -- The major protocol version of the last era is the maximum major protocol
+> -- version we support.
+> maxMajorProtVer = MaxMajorProtVer $ pvMajor cardanoProtocolVersion
+> ```
+>
+> The fix is `mkProtocolInfoCardanoAtLedgerMaxPV` on branch
+> `dugite/full-era-ledger-dumps` (c6aeff9), which rebuilds the same
+> `CardanoProtocolParams` with the bound taken from `ProtVerHigh ConwayEra`.
+>
+> **Do not start the work below until that fix has been refuted** on preprod
+> slot 125366409. If it holds, this branch is surplus — keep it only as a record
+> of two conclusions drawn from version numbers, both wrong: first "conway
+> 1.20.0.0 has `ProtVerHigh = 11`, so no port is needed", then "so it needs an
+> 11.x dependency set". Each cost a build and a ~3h replay.
+>
+> Everything below this line was written under the second premise.
+
 ## Why
 
 The oracle must validate **PV11** blocks. It cannot today:
