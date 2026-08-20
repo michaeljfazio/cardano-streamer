@@ -52,7 +52,6 @@ import Cardano.Ledger.Coin (Coin (..), DeltaCoin (..))
 import Cardano.Ledger.Compactible (fromCompact)
 import Cardano.Ledger.Core (
   PParams,
-  Reward (..),
   ppA0L,
   ppDG,
   ppEMaxL,
@@ -108,6 +107,7 @@ import Cardano.Ledger.Conway.Governance (
   )
 import Cardano.Ledger.Conway.State (ConwayEraCertState, certVStateL, vsCommitteeStateL)
 import Cardano.Ledger.Shelley.RewardUpdate (PulsingRewUpdate (..), RewardSnapShot (..), RewardUpdate (..))
+import Cardano.Ledger.Shelley.Rewards (sumRewards)
 import Cardano.Ledger.Hashes (unKeyHash)
 import Cardano.Crypto.Hash.Class (hashToTextAsHex)
 import Cardano.Ledger.Shelley.API (SnapShot (..), SnapShots (..))
@@ -449,18 +449,19 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
             obligationCertState (epochState ^. esLStateL . lsCertStateL)
               <> obligationGovState (nes ^. newEpochStateGovStateL)
 
-          sumRs m =
-            sum
-              [ unCoin (rewardAmount r)
-              | rs_set <- Map.elems m
-              , r <- Set.toList rs_set
-              ] :: Integer
+          -- The ledger itself does not sum every reward unconditionally: pre-Allegra
+          -- (protocol version major <= 2), a credential with multiple rewards in one
+          -- epoch is paid only the Set-minimum one (`filterRewards`/`Set.deleteFindMin`
+          -- in Cardano.Ledger.Shelley.Rewards), and `completeRupd` computes deltaR2 from
+          -- that FILTERED sum. Must thread the same protocol version `completeRupd`
+          -- itself would use, or totalDistributed/deltaR2 over-count at pv<=2.
+          sumRs pv m = unCoin (sumRewards pv m) :: Integer
 
           fromPulsing globals rewsnap@RewardSnapShot {..} pulser =
             let Coin rPot' = rewFees <> rewDeltaR1
                 (RewardUpdate {rs = forcedRs}, _) =
                   runIdentity $ runReaderT (completeRupd (Pulsing rewsnap pulser)) globals
-                totalDistributed = sumRs forcedRs
+                totalDistributed = sumRs rewProtocolVersion forcedRs
                 deltaR2 = unCoin rewR - totalDistributed
              in Aeson.object
                   [ "deltaR1" Aeson..= unCoin rewDeltaR1
@@ -479,7 +480,7 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
                  in Aeson.object
                       [ "deltaT1" Aeson..= deltaT1
                       , "deltaR" Aeson..= deltaRCombined
-                      , "totalDistributed" Aeson..= sumRs rs
+                      , "totalDistributed" Aeson..= sumRs (pr ^. ppProtocolVersionL) rs
                       ]
               (_, Nothing) -> Aeson.Null
               (SJust (Pulsing rewsnap pulser), Just globals) ->
@@ -496,7 +497,7 @@ buildSnapshotJson topLevelConfig mRupdApplied mByronEpoch extLedgerState =
                  in case pulsing of
                       Pulsing rewsnap pulser -> fromPulsing globals rewsnap pulser
                       Complete RewardUpdate {..} ->
-                        Aeson.object ["totalDistributed" Aeson..= sumRs rs]
+                        Aeson.object ["totalDistributed" Aeson..= sumRs (pr ^. ppProtocolVersionL) rs]
 
           -- Eta: performance multiplier. Computed the same way the ledger does
           -- in startStep: if d >= 0.8 then 1, otherwise blocksMade/expectedBlocks.
