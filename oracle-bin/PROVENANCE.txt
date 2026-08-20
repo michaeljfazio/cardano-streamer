@@ -1,0 +1,34 @@
+binary:  cstreamer-10.6.2
+source:  /Users/michaelfazio/Source/cardano-streamer/dist-newstyle/build/aarch64-osx/ghc-9.6.5/cardano-streamer-0.1.0.0/x/cstreamer/build/cstreamer/cstreamer
+branch:  10.6.2-dump-snapshot
+commit:  8c5b285ff60bd9d2212949bb8069715cbc43584e
+built:   Aug  9 21:58:38 2026
+sha256:  e6684224e09f49a24c3f1566c0191542e44ac89626c1253b43fce87b741458c5
+conway:  cardano-ledger-conway 1.20.0.0 (ProtVerHigh ConwayEra = 11)
+pinned:  by the mainnet byte-exactness campaign; produced epochs 208-271
+
+binary:  cstreamer-full-era-pv11
+branch:  dugite/full-era-ledger-dumps
+commit:  40d3f22f36272a10011766224d888ea961b2ddf6
+built:   Aug 20 13:49:50 2026
+sha256:  7d0ef774f758850afd96ce686d81b531305943489984391267222ffcaad859f8
+conway:  cardano-ledger-conway 1.20.0.0 (ProtVerHigh ConwayEra = 11)
+adds:    Byron dumping, era/PV-gated protocol params, named+exact gov
+         thresholds, exact executionUnitPrices -- none of which are in
+         cstreamer-10.6.2, which predates all four.
+pv:      obsolete-node bound taken from ProtVerHigh ConwayEra instead of
+         cardano-api's hardcoded `ProtVer (natVersion @10) 0`.
+         VALIDATED 2026-08-14 on the real block that killed both previous
+         binaries: preprod slot 125366409 (first block of epoch 294) replayed
+         CLEAN, and the run continued past it to epoch 300+ with 0 errors.
+         Both earlier builds died on exactly that block with
+         ObsoleteNode (Version 11) (Version 10).
+fix:     #1077 -- sumRs folded every Set Reward unconditionally, so
+         totalDistributed/deltaR2 over-counted at pv<=2 by the amount
+         filterRewards discards for a multi-reward credential. Rebuilt
+         2026-08-20 from 40d3f22, which threads the epoch's protocol
+         version into the ledger's own Cardano.Ledger.Shelley.Rewards
+         sumRewards instead of re-deriving the sum by hand. Superseded
+         binary (sha256 e6885e14...) was built from c6aeff9, BEFORE this
+         fix landed -- every prior oracle comparison run against it used
+         the buggy sum.
